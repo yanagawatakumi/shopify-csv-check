@@ -35,4 +35,21 @@ describe("ai schema", () => {
 
     expect(() => AiBatchResponseSchema.parse(payload)).toThrow();
   });
+
+  it("rejects too long issue/suggestion", () => {
+    const payload = {
+      evaluations: [
+        {
+          targetType: "body",
+          handle: "sample-handle",
+          rowNumber: 3,
+          result: "NG",
+          issue: "a".repeat(200),
+          suggestion: "b".repeat(220),
+        },
+      ],
+    };
+
+    expect(() => AiBatchResponseSchema.parse(payload)).toThrow();
+  });
 });

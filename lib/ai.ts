@@ -10,14 +10,16 @@ import type {
 const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const DEFAULT_BATCH_SIZE = 20;
+const ISSUE_MAX_CHARS = 80;
+const SUGGESTION_MAX_CHARS = 100;
 
 const AiEvaluationResultSchema = z.object({
   targetType: z.enum(["title", "body"]),
   handle: z.string(),
   rowNumber: z.number().int().nullable(),
   result: z.enum(["OK", "要注意", "NG"]),
-  issue: z.string(),
-  suggestion: z.string(),
+  issue: z.string().max(ISSUE_MAX_CHARS),
+  suggestion: z.string().max(SUGGESTION_MAX_CHARS),
 });
 
 const AiBatchResponseSchema = z.object({
@@ -81,14 +83,62 @@ function parseGeminiResponseText(responseJson: unknown): string {
   throw new Error(`GeminiレスポンスからJSON本文を取得できませんでした。finishReason=${candidate.finishReason ?? "UNKNOWN"}`);
 }
 
-function toStrictIssueAndSuggestion(result: AiResultLabel, issue: string, suggestion: string): Pick<AiEvaluationResult, "issue" | "suggestion"> {
+function truncateText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars - 1).trimEnd()}…`;
+}
+
+function normalizeOutputText(text: string): string {
+  return normalizeWhitespace(text).replace(/^[「"'`]+|[」"'`]+$/g, "").trim();
+}
+
+function extractFirstSentence(text: string): string {
+  const normalized = normalizeOutputText(text);
+  if (!normalized) return "";
+  const sentence = normalized.split(/[。！？\n]/)[0]?.trim() ?? "";
+  return sentence || normalized;
+}
+
+function suggestionByIssue(issue: string): string {
+  if (/(重複|繰り返し|同語反復|のの|ためため|ですます)/.test(issue)) {
+    return "重複語を削除し、語尾と文のつながりを自然に整えてください。";
+  }
+  if (/(語順|文構造|主語|述語)/.test(issue)) {
+    return "語順を整理し、主語と述語の対応を明確にしてください。";
+  }
+  if (/(意味|不明瞭|不自然|通ら)/.test(issue)) {
+    return "意味が通るように表現を簡潔に整理してください。";
+  }
+  return "商品説明として自然で読みやすい文に整えてください。";
+}
+
+function toStrictIssueAndSuggestion(
+  result: AiResultLabel,
+  issue: string,
+  suggestion: string,
+): Pick<AiEvaluationResult, "issue" | "suggestion"> {
   if (result === "OK") {
     return { issue: "", suggestion: "" };
   }
 
+  const normalizedIssue = truncateText(
+    extractFirstSentence(issue) || "文章品質に問題が検出されました。",
+    ISSUE_MAX_CHARS,
+  );
+
+  let normalizedSuggestion = truncateText(
+    extractFirstSentence(suggestion) || suggestionByIssue(normalizedIssue),
+    SUGGESTION_MAX_CHARS,
+  );
+
+  // 長文の全文書き換え提案を避け、方向性ベースの提案に統一する。
+  if (/「.+」.*(のように|へ修正|に変更)/.test(normalizedSuggestion) || normalizedSuggestion.length > SUGGESTION_MAX_CHARS) {
+    normalizedSuggestion = suggestionByIssue(normalizedIssue);
+  }
+
   return {
-    issue: issue.trim().length > 0 ? issue.trim() : "文章品質に問題が検出されました。",
-    suggestion: suggestion.trim().length > 0 ? suggestion.trim() : "文章を自然で明確な表現に修正してください。",
+    issue: normalizedIssue,
+    suggestion: normalizedSuggestion,
   };
 }
 
@@ -113,8 +163,8 @@ async function callAiBatch(
             handle: { type: "string" },
             rowNumber: { type: ["number", "null"] },
             result: { type: "string", enum: ["OK", "要注意", "NG"] },
-            issue: { type: "string" },
-            suggestion: { type: "string" },
+            issue: { type: "string", maxLength: ISSUE_MAX_CHARS },
+            suggestion: { type: "string", maxLength: SUGGESTION_MAX_CHARS },
           },
           required: ["targetType", "handle", "rowNumber", "result", "issue", "suggestion"],
         },
@@ -129,7 +179,8 @@ async function callAiBatch(
     "result は OK / 要注意 / NG のみ。",
     "日本語・英語・混在文を対象に、自然さ・意味の通りやすさ・文構造・商品説明としての成立性を評価してください。",
     "OK の場合 issue/suggestion は空文字にしてください。",
-    "要注意・NG の場合は issue/suggestion を日本語で簡潔に出力してください。",
+    "要注意・NG の場合は issue を1文で簡潔に、suggestion は方向性ベースで1文にしてください。",
+    "修正例の全文引用は禁止です。『〜のように修正』の形式や長い引用文を出力しないでください。",
     "出力は必ずJSONスキーマに厳密準拠し、入力の targetType/handle/rowNumber をそのまま返してください。",
   ].join("\n");
 
