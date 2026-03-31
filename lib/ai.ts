@@ -99,6 +99,26 @@ function extractFirstSentence(text: string): string {
   return sentence || normalized;
 }
 
+function isNonLanguageQualityIssue(issue: string): boolean {
+  return /(情報が不足|具体的な商品情報が不足|ブランド名.*のみ|不要な英単語|SEO|訴求力|魅力が伝わらない)/.test(issue);
+}
+
+function normalizeIssueText(issue: string): string {
+  const first = extractFirstSentence(issue);
+  if (!first) return "文章品質に問題が検出されました。";
+
+  if (/(のの|ためため|ですます|重複|繰り返し|同語反復)/.test(first)) {
+    return "語句の重複や誤字により不自然な表現があります。";
+  }
+  if (/(文法|語順|主語|述語|文構造)/.test(first)) {
+    return "文法または語順が不自然です。";
+  }
+  if (/(意味|不明瞭|通ら|破綻)/.test(first)) {
+    return "意味が通りにくい表現があります。";
+  }
+  return first;
+}
+
 function suggestionByIssue(issue: string): string {
   if (/(重複|繰り返し|同語反復|のの|ためため|ですます)/.test(issue)) {
     return "重複語を削除し、語尾と文のつながりを自然に整えてください。";
@@ -121,10 +141,7 @@ function toStrictIssueAndSuggestion(
     return { issue: "", suggestion: "" };
   }
 
-  const normalizedIssue = truncateText(
-    extractFirstSentence(issue) || "文章品質に問題が検出されました。",
-    ISSUE_MAX_CHARS,
-  );
+  const normalizedIssue = truncateText(normalizeIssueText(issue), ISSUE_MAX_CHARS);
 
   let normalizedSuggestion = truncateText(
     extractFirstSentence(suggestion) || suggestionByIssue(normalizedIssue),
@@ -132,7 +149,12 @@ function toStrictIssueAndSuggestion(
   );
 
   // 長文の全文書き換え提案を避け、方向性ベースの提案に統一する。
-  if (/「.+」.*(のように|へ修正|に変更)/.test(normalizedSuggestion) || normalizedSuggestion.length > SUGGESTION_MAX_CHARS) {
+  if (
+    /「[^」]{15,}」/.test(normalizedSuggestion) ||
+    normalizedSuggestion.includes("「") ||
+    /「.+」.*(のように|へ修正|に変更)/.test(normalizedSuggestion) ||
+    normalizedSuggestion.length > SUGGESTION_MAX_CHARS
+  ) {
     normalizedSuggestion = suggestionByIssue(normalizedIssue);
   }
 
@@ -178,6 +200,8 @@ async function callAiBatch(
     "入力配列の各項目を必ず1件ずつ評価してください。",
     "result は OK / 要注意 / NG のみ。",
     "日本語・英語・混在文を対象に、自然さ・意味の通りやすさ・文構造・商品説明としての成立性を評価してください。",
+    "評価対象は文章品質のみです。情報量・SEO・訴求力・商品スペック不足は減点対象にしないでください。",
+    "Title は短い名詞句（ブランド名 + 商品カテゴリ等）でも自然なら OK にしてください。",
     "OK の場合 issue/suggestion は空文字にしてください。",
     "要注意・NG の場合は issue を1文で簡潔に、suggestion は方向性ベースで1文にしてください。",
     "修正例の全文引用は禁止です。『〜のように修正』の形式や長い引用文を出力しないでください。",
@@ -254,6 +278,15 @@ async function callAiBatch(
   }
 
   return batch.evaluations.map((item) => {
+    if (item.result !== "OK" && isNonLanguageQualityIssue(item.issue)) {
+      return {
+        ...item,
+        result: "OK",
+        issue: "",
+        suggestion: "",
+      };
+    }
+
     const normalized = toStrictIssueAndSuggestion(item.result, item.issue, item.suggestion);
     return {
       ...item,
