@@ -89,7 +89,10 @@ function truncateText(text: string, maxChars: number): string {
 }
 
 function normalizeOutputText(text: string): string {
-  return normalizeWhitespace(text).replace(/^[「"'`]+|[」"'`]+$/g, "").trim();
+  return normalizeWhitespace(text)
+    .replace("読やすく", "読みやすく")
+    .replace(/^[「"'`]+|[」"'`]+$/g, "")
+    .trim();
 }
 
 function extractFirstSentence(text: string): string {
@@ -117,6 +120,13 @@ function normalizeIssueText(issue: string): string {
     return "意味が通りにくい表現があります。";
   }
   return first;
+}
+
+function shouldIgnoreIssueBySourceText(issue: string, sourceText: string): boolean {
+  if (/ハイフン.*アンダースコア.*混在/.test(issue)) {
+    return !(sourceText.includes("-") && sourceText.includes("_"));
+  }
+  return false;
 }
 
 function suggestionByIssue(issue: string): string {
@@ -277,7 +287,21 @@ async function callAiBatch(
     }
   }
 
+  const sourceTextByKey = new Map(
+    items.map((input) => [evaluationKey(input), normalizeWhitespace(input.text)]),
+  );
+
   return batch.evaluations.map((item) => {
+    const sourceText = sourceTextByKey.get(evaluationKey(item)) ?? "";
+    if (item.result !== "OK" && shouldIgnoreIssueBySourceText(item.issue, sourceText)) {
+      return {
+        ...item,
+        result: "OK",
+        issue: "",
+        suggestion: "",
+      };
+    }
+
     if (item.result !== "OK" && isNonLanguageQualityIssue(item.issue)) {
       return {
         ...item,
