@@ -7,8 +7,8 @@ import type {
   AiResultLabel,
 } from "@/lib/types";
 
-const OPENAI_ENDPOINT = "https://api.openai.com/v1/responses";
-const DEFAULT_MODEL = "gpt-4.1-mini";
+const GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta";
+const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const DEFAULT_BATCH_SIZE = 20;
 
 const AiEvaluationResultSchema = z.object({
@@ -41,40 +41,44 @@ function dedupKey(value: Pick<AiEvaluationInput, "targetType" | "text">): string
   return `${value.targetType}::${normalized}`;
 }
 
-function parseResponseText(responseJson: unknown): string {
+function modelPath(model: string): string {
+  return model.startsWith("models/") ? model : `models/${model}`;
+}
+
+function parseGeminiResponseText(responseJson: unknown): string {
   if (!responseJson || typeof responseJson !== "object") {
-    throw new Error("OpenAIレスポンスの形式が不正です。");
+    throw new Error("Geminiレスポンスの形式が不正です。");
   }
 
-  const withOutputText = responseJson as { output_text?: unknown };
-  if (typeof withOutputText.output_text === "string" && withOutputText.output_text.trim().length > 0) {
-    return withOutputText.output_text;
-  }
-
-  const withOutput = responseJson as {
-    output?: Array<{
-      content?: Array<{
-        type?: string;
-        text?: string;
-      }>;
+  const body = responseJson as {
+    candidates?: Array<{
+      content?: {
+        parts?: Array<{
+          text?: string;
+        }>;
+      };
+      finishReason?: string;
     }>;
+    promptFeedback?: {
+      blockReason?: string;
+      blockReasonMessage?: string;
+    };
   };
 
-  if (Array.isArray(withOutput.output)) {
-    for (const item of withOutput.output) {
-      for (const content of item.content ?? []) {
-        if (
-          (content.type === "output_text" || content.type === "text") &&
-          typeof content.text === "string" &&
-          content.text.trim().length > 0
-        ) {
-          return content.text;
-        }
-      }
+  const candidate = body.candidates?.[0];
+  if (!candidate) {
+    const reason = body.promptFeedback?.blockReason ?? "UNKNOWN";
+    const message = body.promptFeedback?.blockReasonMessage ?? "出力候補が返されませんでした。";
+    throw new Error(`Geminiが応答を返しませんでした: ${reason} (${message})`);
+  }
+
+  for (const part of candidate.content?.parts ?? []) {
+    if (typeof part.text === "string" && part.text.trim().length > 0) {
+      return part.text;
     }
   }
 
-  throw new Error("OpenAIレスポンスからJSON本文を取得できませんでした。");
+  throw new Error(`GeminiレスポンスからJSON本文を取得できませんでした。finishReason=${candidate.finishReason ?? "UNKNOWN"}`);
 }
 
 function toStrictIssueAndSuggestion(result: AiResultLabel, issue: string, suggestion: string): Pick<AiEvaluationResult, "issue" | "suggestion"> {
@@ -137,31 +141,27 @@ async function callAiBatch(
     },
   };
 
-  const response = await fetch(OPENAI_ENDPOINT, {
+  const response = await fetch(`${GEMINI_API_BASE}/${modelPath(model)}:generateContent`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+      "x-goog-api-key": apiKey,
     },
     body: JSON.stringify({
-      model,
-      input: [
-        {
-          role: "system",
-          content: [{ type: "input_text", text: systemInstruction }],
-        },
+      systemInstruction: {
+        parts: [{ text: systemInstruction }],
+      },
+      contents: [
         {
           role: "user",
-          content: [{ type: "input_text", text: JSON.stringify(userInput) }],
+          parts: [{ text: JSON.stringify(userInput) }],
         },
       ],
-      text: {
-        format: {
-          type: "json_schema",
-          name: "language_quality_results",
-          strict: true,
-          schema,
-        },
+      generationConfig: {
+        candidateCount: 1,
+        temperature: 0,
+        responseMimeType: "application/json",
+        responseJsonSchema: schema,
       },
     }),
   });
@@ -170,16 +170,16 @@ async function callAiBatch(
 
   if (!response.ok) {
     const detail = JSON.stringify(raw);
-    throw new Error(`OpenAI APIエラー: ${response.status} ${detail}`);
+    throw new Error(`Gemini APIエラー: ${response.status} ${detail}`);
   }
 
-  const parsedText = parseResponseText(raw);
+  const parsedText = parseGeminiResponseText(raw);
 
   let parsedJson: unknown;
   try {
     parsedJson = JSON.parse(parsedText);
   } catch {
-    throw new Error("OpenAIのStructured OutputがJSONとして解釈できませんでした。");
+    throw new Error("GeminiのStructured OutputがJSONとして解釈できませんでした。");
   }
 
   const batch = AiBatchResponseSchema.parse(parsedJson);
@@ -215,12 +215,12 @@ async function callAiBatch(
 export async function evaluateLanguageQuality(
   logicalInputs: AiEvaluationInput[],
 ): Promise<{ results: AiEvaluationResult[]; metrics: AiEvaluationMetrics }> {
-  const apiKey = process.env.OPENAI_API_KEY;
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error("OPENAI_API_KEY が設定されていません。");
+    throw new Error("GEMINI_API_KEY が設定されていません。");
   }
 
-  const model = process.env.OPENAI_MODEL || DEFAULT_MODEL;
+  const model = process.env.GEMINI_MODEL || DEFAULT_MODEL;
 
   const metrics: AiEvaluationMetrics = {
     logicalTitleCount: logicalInputs.filter((item) => item.targetType === "title").length,
