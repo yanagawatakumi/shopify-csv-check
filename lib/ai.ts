@@ -12,6 +12,8 @@ const DEFAULT_MODEL = "gemini-2.5-flash-lite";
 const DEFAULT_BATCH_SIZE = 20;
 const ISSUE_MAX_CHARS = 80;
 const SUGGESTION_MAX_CHARS = 100;
+const DEFAULT_DOMAIN_CONTEXT =
+  "このECサイトは家具・ラグ（RUG）を主に扱います。カテゴリ名、素材名、型番、ブランド名、英語商品名、ハイフン区切り表記は通常許容です。";
 
 const AiEvaluationResultSchema = z.object({
   targetType: z.enum(["title", "body"]),
@@ -178,6 +180,7 @@ async function callAiBatch(
   items: AiEvaluationInput[],
   apiKey: string,
   model: string,
+  domainContext: string,
 ): Promise<AiEvaluationResult[]> {
   const schema = {
     type: "object",
@@ -207,11 +210,13 @@ async function callAiBatch(
 
   const systemInstruction = [
     "あなたはEC商品の文章品質チェッカーです。",
+    domainContext,
     "入力配列の各項目を必ず1件ずつ評価してください。",
     "result は OK / 要注意 / NG のみ。",
     "日本語・英語・混在文を対象に、自然さ・意味の通りやすさ・文構造・商品説明としての成立性を評価してください。",
     "評価対象は文章品質のみです。情報量・SEO・訴求力・商品スペック不足は減点対象にしないでください。",
-    "Title は短い名詞句（ブランド名 + 商品カテゴリ等）でも自然なら OK にしてください。",
+    "家具・ラグ領域のTitleは短い名詞句（ブランド名 + 商品カテゴリ等）でも自然なら OK にしてください。",
+    "ブランド由来の英字・大文字・カテゴリ名（CHAIR, CABINET, RUG等）は不自然判定しないでください。",
     "OK の場合 issue/suggestion は空文字にしてください。",
     "要注意・NG の場合は issue を1文で簡潔に、suggestion は方向性ベースで1文にしてください。",
     "修正例の全文引用は禁止です。『〜のように修正』の形式や長い引用文を出力しないでください。",
@@ -329,6 +334,7 @@ export async function evaluateLanguageQuality(
   }
 
   const model = process.env.GEMINI_MODEL || DEFAULT_MODEL;
+  const domainContext = process.env.AI_DOMAIN_CONTEXT || DEFAULT_DOMAIN_CONTEXT;
 
   const metrics: AiEvaluationMetrics = {
     logicalTitleCount: logicalInputs.filter((item) => item.targetType === "title").length,
@@ -360,7 +366,7 @@ export async function evaluateLanguageQuality(
   const chunks = chunkArray(uniqueInputs, DEFAULT_BATCH_SIZE);
 
   for (const chunk of chunks) {
-    const chunkResult = await callAiBatch(chunk, apiKey, model);
+    const chunkResult = await callAiBatch(chunk, apiKey, model, domainContext);
     uniqueResults.push(...chunkResult);
   }
 
