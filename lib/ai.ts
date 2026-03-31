@@ -128,6 +128,9 @@ function shouldIgnoreIssueBySourceText(issue: string, sourceText: string): boole
   if (/ハイフン.*アンダースコア.*混在/.test(issue)) {
     return !(sourceText.includes("-") && sourceText.includes("_"));
   }
+  if (/(スペースが必要|空白が必要|間にスペース)/.test(issue)) {
+    return sourceText.includes(" ");
+  }
   return false;
 }
 
